@@ -20,6 +20,15 @@ Known limitations (v1):
     each (in-tangent, value, out-tangent) triple with spline/auto tangents.
     This applies to morph `weights` channels too — the value element is keyed.
 
+Several animations:
+  Maya has one timeline, so every animation is keyed on it. When the file's
+  animations do not overlap in time (a file exported from one Maya timeline,
+  clips sharing at most their end frames) they keep their own frames. When they
+  overlap (most files: every animation starts at 0) they are laid out one after
+  another, in file order, ANIMATION_GAP frames apart. Each animation gets a time
+  slider bookmark with its name and range (option "animationBookmarks", default
+  on), and the scene's animation range grows to hold them all.
+
 Morph-target `weights` channels:
   A glTF `weights` channel animates ALL of a mesh's morph weights at once. Its
   output is a flat SCALAR array laid out keyframe-major: for keyframe k and
@@ -29,6 +38,8 @@ Morph-target `weights` channels:
 """
 from __future__ import annotations
 
+import math
+import re
 from typing import Dict, List, Optional
 
 import maya.api.OpenMaya as om
@@ -85,6 +96,86 @@ def scene_fps():
     return _TIME_UNIT_FPS.get(unit, 24.0)
 
 
+ANIMATION_GAP = 10  # frames between animations laid out one after another
+
+
+def animation_span(anim, fps):
+    """(first, last) frame of an animation's keys, or None when it has none."""
+    times = [t for channel in anim.channels for t in channel.times]
+    if not times:
+        return None
+    return (_frame(min(times), fps), _frame(max(times), fps))
+
+
+def layout_offsets(spans, gap=ANIMATION_GAP):
+    """Frame offset per animation so that no two share frames.
+
+    spans: (first, last) frames or None, in file order. When no span starts
+    before another one ends (touching ends are fine) every offset is 0.
+    Otherwise the first animation stays where it is and each next one starts on
+    a whole frame `gap` frames after the previous one ends.
+    """
+    real = sorted(span for span in spans if span)
+    overlap = False
+    reach = None
+    for first, last in real:
+        if reach is not None and first < reach - 1e-6:
+            overlap = True
+            break
+        reach = last if reach is None else max(reach, last)
+    if not overlap:
+        return [0.0] * len(spans)
+    offsets = []
+    cursor = None
+    for span in spans:
+        if span is None:
+            offsets.append(0.0)
+            continue
+        offset = 0.0 if cursor is None else math.ceil(cursor + gap) - span[0]
+        offsets.append(offset)
+        cursor = span[1] + offset
+    return offsets
+
+
+_WHOLE_FRAME = 1e-3
+
+
+def _frame(seconds, fps, offset=0.0):
+    """The frame of a key. glTF stores times as 32-bit floats, so 20/24 s reads
+    back as frame 19.9999995: a frame that close to a whole one is that one."""
+    frame = seconds * fps + offset
+    whole = round(frame)
+    return float(whole) if abs(frame - whole) < _WHOLE_FRAME else frame
+
+
+def _bookmark(name, first, last):
+    """A time slider bookmark over first..last frames named `name`, or None."""
+    try:
+        if not cmds.pluginInfo("timeSliderBookmark", query=True, loaded=True):
+            cmds.loadPlugin("timeSliderBookmark", quiet=True)
+        node_name = "bookmark_" + (re.sub(r"[^A-Za-z0-9_]", "_", name) or "anim")
+        node = cmds.createNode("timeSliderBookmark", name=node_name)
+        cmds.setAttr(node + ".name", name, type="string")
+        cmds.setAttr(node + ".timeRangeStart", first)
+        cmds.setAttr(node + ".timeRangeStop", last)
+        return node
+    except Exception as exc:
+        om.MGlobal.displayWarning(
+            "[glb_io] could not make a bookmark for animation '%s': %s" % (name, exc)
+        )
+        return None
+
+
+def _grow_animation_range(first, last):
+    try:
+        start = cmds.playbackOptions(query=True, animationStartTime=True)
+        end = cmds.playbackOptions(query=True, animationEndTime=True)
+        cmds.playbackOptions(animationStartTime=min(start, first),
+                             animationEndTime=max(end, last))
+    except Exception:
+        pass
+
+
 def apply_animations(gltf, node_to_maya, coord_convert, unit_scale, options=None,
                      node_to_blendshape=None):
     # type: (object, Dict[int, str], object, float, Optional[dict], Optional[Dict[int, list]]) -> int
@@ -122,12 +213,26 @@ def apply_animations(gltf, node_to_maya, coord_convert, unit_scale, options=None
     fps = scene_fps()
     keyed_channels = 0
     node_to_blendshape = node_to_blendshape or {}
+    options = options or {}
+    spans = [animation_span(anim, fps) for anim in animations]
+    offsets = layout_offsets(spans)
+    if any(offsets):
+        om.MGlobal.displayInfo(
+            "[glb_io] the file's animations overlap in time; laid out one after "
+            "another, %d frames apart" % ANIMATION_GAP
+        )
 
-    for anim in animations:
+    for anim, span, offset in zip(animations, spans, offsets):
+        if span is not None:
+            first = round(span[0] + offset, 3)
+            last = round(span[1] + offset, 3)
+            if options.get("animationBookmarks", True):
+                _bookmark(anim.name, first, last)
+            _grow_animation_range(first, last)
         for channel in anim.channels:
             try:
                 if _apply_channel(channel, node_to_maya, coord_convert, fps,
-                                  node_to_blendshape):
+                                  node_to_blendshape, offset):
                     keyed_channels += 1
             except Exception as exc:
                 # One bad channel must never abort the whole import.
@@ -153,7 +258,7 @@ _AXIS_ATTRS = {
 
 
 def _apply_channel(channel, node_to_maya, coord_convert, fps,
-                   node_to_blendshape=None):
+                   node_to_blendshape=None, offset=0.0):
     """Key a single channel. Returns True if at least one key was set."""
     node = node_to_maya.get(channel.target_node)
     if not node:
@@ -173,7 +278,7 @@ def _apply_channel(channel, node_to_maya, coord_convert, fps,
 
     if path == "weights":
         return _apply_weights_channel(
-            channel, node, fps, node_to_blendshape or {}
+            channel, node, fps, node_to_blendshape or {}, offset
         )
 
     times = channel.times
@@ -193,8 +298,7 @@ def _apply_channel(channel, node_to_maya, coord_convert, fps,
     set_any = False
     prev_euler = None  # rotation continuity (euler unrolling) — see below
     for ki in range(n_keys):
-        seconds = times[ki]
-        frame = seconds * fps
+        frame = _frame(times[ki], fps, offset)
 
         if cubic:
             value = values[ki * 3 + 1]
@@ -256,7 +360,7 @@ def _apply_channel(channel, node_to_maya, coord_convert, fps,
     return True
 
 
-def _apply_weights_channel(channel, node, fps, node_to_blendshape):
+def _apply_weights_channel(channel, node, fps, node_to_blendshape, offset=0.0):
     """Key a glTF morph-target `weights` channel onto its blendShape weights.
 
     A `weights` channel animates ALL of the mesh's morph weights together. Its
@@ -314,7 +418,7 @@ def _apply_weights_channel(channel, node, fps, node_to_blendshape):
             continue
 
         for ki in range(n_keys):
-            frame = times[ki] * fps
+            frame = _frame(times[ki], fps, offset)
             for t in range(n_targets):
                 if cubic:
                     # (in, value, out) triple per target per key; take value.
