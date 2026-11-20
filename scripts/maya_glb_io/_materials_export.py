@@ -464,10 +464,26 @@ def _intern_image(path, image_cache, name=None):
     return img
 
 
+# Texture files a material points at that are not on disk. The exporter clears
+# the list when it starts and reports it in its result.
+MISSING_TEXTURES = []
+
+
 def _file_image_through(file_node, image_cache):
-    """file node -> deduped ImageRef (or None)."""
+    """file node -> deduped ImageRef (or None).
+
+    A texture file that is not on disk is left out: embedding it would stop
+    the whole export, and a reference to it would give a file that does not
+    load. The material is written without that map."""
+    import os
     path = _file_texture_path(file_node)
     if not path:
+        return None
+    if not os.path.isfile(path):
+        if path not in MISSING_TEXTURES:
+            MISSING_TEXTURES.append(path)
+            _warn("texture file '%s' (%s) is missing; the material is written "
+                  "without it" % (path, file_node))
         return None
     return _intern_image(path, image_cache)
 

@@ -35,6 +35,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
   Maya with a window, where `sys.executable` is Maya itself.
 
 ### Fixed
+- Export: a material whose texture file is not on disk stopped the export with an error. The
+  material is now written without that map, with a warning, and the result of
+  `export_nodes` lists the files as `missing_textures`.
 - Import: a `.gltf` whose texture file is missing stopped with an error before anything was
   built. The mesh, skin and animation now come in, with a warning per missing image.
 - Import: a channel's interpolation (step, linear) is set on that channel's keys only, not on

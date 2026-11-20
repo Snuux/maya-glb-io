@@ -114,6 +114,7 @@ def export_nodes(transforms, path, options=None):
     # type: (List[str], str, Optional[dict]) -> dict
     """Export the given transform subtrees to `path`."""
     options = _normalize_options(options)
+    del MX.MISSING_TEXTURES[:]
     fmt = options.get("format", "glb")
     embed = bool(options.get("embedTextures"))
     copy_tex = bool(options.get("copyTextures"))
@@ -200,6 +201,7 @@ def export_nodes(transforms, path, options=None):
         "skin_count": len(skins),
         "animation_count": len(animations),
         "animations": [a.name for a in animations],
+        "missing_textures": list(MX.MISSING_TEXTURES),
     }
 
 

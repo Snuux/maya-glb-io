@@ -399,12 +399,34 @@ def check_reduce_keys():
         os.path.getsize(full_path), os.path.getsize(thin_path)))
 
 
+def check_missing_texture():
+    cmds.file(new=True, force=True)
+    cube = cmds.polyCube(name="box")[0]
+    shader = cmds.shadingNode("lambert", asShader=True, name="paint")
+    group = cmds.sets(renderable=True, noSurfaceShader=True, empty=True, name="paintSG")
+    cmds.connectAttr(shader + ".outColor", group + ".surfaceShader")
+    texture = cmds.shadingNode("file", asTexture=True, name="gone")
+    lost = os.path.join(OUT, "not_there.png").replace("\\", "/")
+    cmds.setAttr(texture + ".fileTextureName", lost, type="string")
+    cmds.connectAttr(texture + ".outColor", shader + ".color")
+    cmds.sets(cube, edit=True, forceElement=group)
+    for name, options in (("lost.glb", {"format": "glb", "embedTextures": True}),
+                          ("lost.gltf", {"format": "gltf", "embedTextures": False})):
+        out = os.path.join(OUT, name)
+        result = exporter.export_nodes([cube], out, dict(options, exportAnimation=False))
+        assert [os.path.basename(p) for p in result["missing_textures"]] == ["not_there.png"], result
+        doc = read(out).doc
+        assert not doc.get("images") and len(doc["meshes"]) == 1, doc.get("images")
+    print("missing texture ok")
+
+
 def main():
     check_names()
     check_target_names()
     check_cubic()
     check_draco()
     check_reduce_keys()
+    check_missing_texture()
     print("SUCCESS")
 
 
