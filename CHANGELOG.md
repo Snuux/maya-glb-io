@@ -5,6 +5,41 @@ All notable changes to Maya GLB I/O are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-11-21
+
+### Added
+- Names survive an import and export. Maya node names are ASCII letters, digits and
+  underscores, so `Bone.001`, `mixamorig:Hips`, `Left Arm` or a non-ASCII name is changed on
+  import. The glTF name is now kept on the node (string attributes `gltfName` and
+  `gltfNameOf`) and written back on export, for nodes, materials and morph targets. A node
+  that was renamed or duplicated in Maya exports under its Maya name.
+- Import: a Draco-compressed mesh keeps its skin. `JOINTS_n` / `WEIGHTS_n` (and any other
+  attribute of the extension's table) are read from the Draco stream; such a mesh used to
+  come in as static geometry.
+- Import: CUBICSPLINE animation keeps the file's tangents for translation, scale and morph
+  weights (the Maya curve is the same Hermite curve). CUBICSPLINE rotation is evaluated on
+  every frame, because quaternion tangents have no euler counterpart.
+- Export: option `reduceKeys` (on by default) leaves out the keys that linear interpolation
+  between their neighbours reproduces, within 0.01 mm and 0.01 degrees. A hold or a
+  constant-speed move becomes two keys instead of one per frame.
+- `commands.install_draco()` installs the Draco decoder from a script, without dialogs;
+  `importer.uses_draco(path)` and `importer.draco_ready()` tell whether a file needs it and
+  whether it is there; `exporter.written_name(node)` is the name a node gets in the file.
+
+### Changed
+- The DracoPy decoder is installed into the plug-in's own folder (`draco/py<XY>`, one per
+  Python version) instead of Maya's site-packages, which is the fallback when that folder
+  cannot be written. A DracoPy that is already importable is still used.
+
+- Installing the decoder runs pip with the `mayapy` next to `maya` when it is started from a
+  Maya with a window, where `sys.executable` is Maya itself.
+
+### Fixed
+- Import: a `.gltf` whose texture file is missing stopped with an error before anything was
+  built. The mesh, skin and animation now come in, with a warning per missing image.
+- Import: a channel's interpolation (step, linear) is set on that channel's keys only, not on
+  the keys another animation of the file put on the same attribute.
+
 ## [1.0.4] - 2026-11-20
 
 ### Fixed

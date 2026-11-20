@@ -776,7 +776,7 @@ cmds.loadPlugin(r"C:\path\to\maya-glb-io\plug-ins\maya_glb_io.py")
         <button class="faq-q" aria-expanded="false">Does it handle Draco-compressed GLBs?
           <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></span>
         </button>
-        <div class="faq-a"><div class="faq-a-inner"><p>Yes. KHR_draco_mesh_compression is decoded on import — most compressed Sketchfab GLBs that fail in other free tools just open. The first Draco import auto-installs the DracoPy decoder, which needs a one-time internet connection. (A mesh whose skin weights are compressed inside Draco imports as static geometry — rare.)</p></div></div>
+        <div class="faq-a"><div class="faq-a-inner"><p>Yes. KHR_draco_mesh_compression is decoded on import — most compressed Sketchfab GLBs that fail in other free tools just open. The first Draco import auto-installs the DracoPy decoder, which needs a one-time internet connection. Skin weights compressed inside Draco are read too.</p></div></div>
       </div>
 
       <div class="faq-item reveal">

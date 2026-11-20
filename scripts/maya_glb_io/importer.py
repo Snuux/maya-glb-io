@@ -53,6 +53,29 @@ import maya.api.OpenMaya as om
 from maya import cmds
 
 
+def uses_draco(path):
+    # type: (str) -> bool
+    """True when the file has Draco-compressed meshes. They need the DracoPy
+    decoder (draco_ready()); without it those meshes are skipped with a
+    warning, so a caller can check first and say so."""
+    from maya_glb_io import _gltf
+
+    gltf = _gltf.load(path)
+    for mesh in gltf.doc.get("meshes") or []:
+        for prim in mesh.get("primitives") or []:
+            if _gltf.Gltf.primitive_has_draco(prim):
+                return True
+    return False
+
+
+def draco_ready():
+    # type: () -> bool
+    """True when the DracoPy decoder can be imported in this Maya."""
+    from maya_glb_io import _draco
+
+    return _draco.dracopy_available()
+
+
 def import_file(path, options=None):
     # type: (str, Optional[Dict[str, Any]]) -> List[str]
     options = _normalize_options(options)

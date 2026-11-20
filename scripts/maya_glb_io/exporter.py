@@ -40,6 +40,9 @@ Options (see _prefs.EXPORT_DEFAULTS):
                          clips are given. None = the playback range.
     animationName str    name of the single animation. "" = scene name, or
                          "take001" for an unsaved scene.
+    reduceKeys    bool   leave out the keys linear interpolation between their
+                         neighbours reproduces (within 0.01 mm / 0.01 degrees).
+                         Default on; off writes a key on every frame.
 
 Units: the Maya API (points, matrices, bindPreMatrix) works in centimetres
 whatever the scene's linear unit, so every length goes through one divisor,
@@ -48,7 +51,12 @@ convertUnits is off (lengths then stay in scene units).
 
 Animation is sampled from each exported node's matrix every frame, so anything
 that moves a node counts: keys, constraints, IK, expressions, parents. Only
-channels that change are written.
+channels that change are written, and with reduceKeys only the keys a player
+could not interpolate (see _keys.py). Interpolation is always LINEAR: Maya's
+curve tangents are not written, the per-frame samples follow them instead.
+
+Names: a node or material the importer renamed (see _names.py) is written under
+its glTF name again, as long as it still has the Maya name the import gave it.
 """
 from __future__ import annotations
 
@@ -62,7 +70,9 @@ import maya.api.OpenMayaAnim as oma
 from maya import cmds
 
 from maya_glb_io import _glb_export as GX
+from maya_glb_io import _keys
 from maya_glb_io import _materials_export as MX
+from maya_glb_io import _names
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +121,7 @@ def export_nodes(transforms, path, options=None):
     export_skin = bool(options.get("exportSkin", True))
     export_anim = bool(options.get("exportAnimation", True))
     export_morph = bool(options.get("exportMorphTargets", True))
+    reduce_keys = bool(options.get("reduceKeys", True))
     unit_scale = _resolve_unit_scale(options)
 
     # Baking world transforms into vertices is incompatible with skinning +
@@ -127,7 +138,8 @@ def export_nodes(transforms, path, options=None):
     )
 
     builder = _SceneBuilder(unit_scale=unit_scale, apply_transforms=apply_xform,
-                            export_skin=export_skin, export_morph=export_morph)
+                            export_skin=export_skin, export_morph=export_morph,
+                            reduce_keys=reduce_keys)
 
     # De-dup top-level transforms (avoid exporting a node twice if both it and
     # an ancestor were selected). Keep only roots whose ancestors aren't also in
@@ -198,11 +210,12 @@ def export_nodes(transforms, path, options=None):
 class _SceneBuilder(object):
 
     def __init__(self, unit_scale=1.0, apply_transforms=False,
-                 export_skin=True, export_morph=True):
+                 export_skin=True, export_morph=True, reduce_keys=True):
         self.unit_scale = unit_scale
         self.apply_transforms = apply_transforms
         self.export_skin = export_skin
         self.export_morph = export_morph
+        self.reduce_keys = reduce_keys
 
         self.nodes = []                 # list[GX.Node]
         self.meshes = []                # list[GX.MeshDef]
@@ -247,7 +260,7 @@ class _SceneBuilder(object):
             return None
 
         node_index = len(self.nodes)
-        node = GX.Node(name=_short_name(transform))
+        node = GX.Node(name=written_name(transform))
         self.nodes.append(node)
         self.node_index_of[full] = node_index
 
@@ -369,7 +382,7 @@ class _SceneBuilder(object):
         if self.export_morph:
             morph_info = self._extract_morph_targets(dag, shape_full)
 
-        mesh_def = GX.MeshDef(name=_short_name(transform))
+        mesh_def = GX.MeshDef(name=written_name(transform))
         # Carry the mesh-level morph metadata (default weights + target names).
         if morph_info:
             mesh_def.weights = morph_info["weights"]
@@ -411,7 +424,7 @@ class _SceneBuilder(object):
                 "mesh_node_index": mesh_node_index,
                 "influences": skin_info["influences"],   # joint full paths
                 "bind_pre_matrices": skin_info["bind_pre_matrices"],
-                "name": _short_name(transform) + "_skin",
+                "name": written_name(transform) + "_skin",
             })
 
         return mesh_def
@@ -423,7 +436,7 @@ class _SceneBuilder(object):
             return None
         if shader in self._material_index_of:
             return self._material_index_of[shader]
-        mat_name = _clean_material_name(shader)
+        mat_name = _names.original(shader) or _clean_material_name(shader)
         mdef = MX.shader_to_material_def(shader, mat_name, self.image_cache)
         idx = len(self.materials)
         self.materials.append(mdef)
@@ -755,12 +768,14 @@ class _SceneBuilder(object):
         except Exception:
             pass
 
+        kept_names = _names.target_names(bs)
         target_names = []
         weights = []
         deltas = []
         any_delta = False
         for gi in weight_indices:
-            target_names.append(alias_of.get(gi, "target%d" % gi))
+            alias = alias_of.get(gi, "target%d" % gi)
+            target_names.append(kept_names.get(alias, alias))
             try:
                 weights.append(float(cmds.getAttr("%s.weight[%d]" % (bs, gi))))
             except Exception:
@@ -1001,15 +1016,24 @@ class _SceneBuilder(object):
                 # written too: without it the engine shows the rest pose.
                 if _changes([still] + values if still else values,
                             path == "rotation"):
+                    key_times = list(times)
+                    if self.reduce_keys:
+                        key_times, values = _keys.thin(
+                            key_times, values, path == "rotation"
+                        )
                     anim.channels.append(GX.AnimChannelDef(
-                        node_index, path, list(times), values
+                        node_index, path, key_times, values
                     ))
         for node_index, flat in morph_samples.items():
             count = len(morphed[node_index][1])
             rows = [tuple(flat[i:i + count]) for i in range(0, len(flat), count)]
             if _changes(rows):
+                key_times = list(times)
+                if self.reduce_keys:
+                    key_times, rows = _keys.thin(key_times, rows)
+                    flat = [weight for row in rows for weight in row]
                 anim.channels.append(GX.AnimChannelDef(
-                    node_index, "weights", list(times), flat
+                    node_index, "weights", key_times, flat
                 ))
         if not anim.channels:
             return None
@@ -1080,6 +1104,12 @@ def _default_camera_transforms():
         except Exception:
             pass
     return out
+
+
+def written_name(full_path):
+    """The name a node gets in the file: the glTF name the importer kept on it
+    while the node still has its imported Maya name, else its Maya name."""
+    return _names.original(full_path) or _short_name(full_path)
 
 
 def _short_name(full_path):

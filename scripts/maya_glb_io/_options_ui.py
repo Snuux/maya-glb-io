@@ -67,6 +67,7 @@ _WX_COPY_TEX = _EXP_PREFIX + "copyTextures"
 _WX_APPLY_XFORM = _EXP_PREFIX + "applyTransforms"
 _WX_EXPORT_SKIN = _EXP_PREFIX + "exportSkin"
 _WX_EXPORT_ANIM = _EXP_PREFIX + "exportAnimation"
+_WX_REDUCE_KEYS = _EXP_PREFIX + "reduceKeys"
 _WX_YUP = _EXP_PREFIX + "yUp"
 
 
@@ -335,6 +336,8 @@ def build_export_ui(parent, opts):
     cmds.separator(height=4, style="none")
     _checkbox(_WX_EXPORT_SKIN, "Export Skinning (skinClusters)", opts.get("exportSkin", True))
     _checkbox(_WX_EXPORT_ANIM, "Export Animation (keyframes)", opts.get("exportAnimation", True))
+    _checkbox(_WX_REDUCE_KEYS, "Reduce Keys (drop the ones interpolation gives)",
+              opts.get("reduceKeys", True))
 
     cmds.setParent("..")  # columnLayout
     cmds.setParent("..")  # frameLayout
@@ -354,6 +357,7 @@ def query_export_ui():
         "applyTransforms": _query_checkbox(_WX_APPLY_XFORM),
         "exportSkin":      _query_checkbox(_WX_EXPORT_SKIN),
         "exportAnimation": _query_checkbox(_WX_EXPORT_ANIM),
+        "reduceKeys":      _query_checkbox(_WX_REDUCE_KEYS),
     }
     return _prefs.serialize(opts)
 

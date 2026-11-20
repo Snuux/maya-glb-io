@@ -348,12 +348,14 @@ class Gltf(object):
             "NORMAL":     [(x, y, z), ...] | None,
             "TEXCOORD_0": [(u, v), ...]   | None,
             "indices":    [i, i, i, ...],          # flat triangle list
+            "JOINTS_0":   [(j, j, j, j), ...],     # and every other semantic
+            "WEIGHTS_0":  [(w, w, w, w), ...],     # of the extension's table
           }
 
-        The decoder maps Draco's typed attributes (.points/.normals/.tex_coord)
-        onto the matching glTF semantics — equivalently to the extension's
-        `attributes` table (glTF semantic -> Draco attribute id). The
-        primitive's fallback accessors are intentionally NOT read.
+        The extension's `attributes` table (glTF semantic -> Draco attribute
+        id) says which Draco attribute is which. The primitive's own accessors
+        are read only for their type: integer weights, colors and UVs of a
+        `normalized` accessor are scaled to 0..1 here.
 
         Raises _draco.DracoError if DracoPy isn't available or the buffer fails
         to decode; the caller (_build._build_primitive) catches that, warns, and
@@ -378,18 +380,33 @@ class Gltf(object):
                 % (ext.get("bufferView"), exc)
             )
 
-        decoded = _draco.decode(data)
-
-        # The extension's attributes map declares which glTF semantics the Draco
-        # stream carries. DracoPy resolves POSITION/NORMAL/TEXCOORD_0 by type
-        # for us, so we only need to NULL out any optional semantic the
-        # primitive doesn't actually declare (defensive — keeps us in lockstep
-        # with the extension table rather than trusting the decoder alone).
         attr_map = ext.get("attributes") or {}
+        decoded = _draco.decode(data, attr_map)
+
+        # NULL out any optional semantic the primitive doesn't declare: with no
+        # id to look up, the decoder resolved these by type.
         if "NORMAL" not in attr_map:
             decoded["NORMAL"] = None
         if "TEXCOORD_0" not in attr_map:
             decoded["TEXCOORD_0"] = None
+
+        accessors = self.doc.get("accessors") or []
+        prim_attrs = prim.get("attributes") or {}
+        for semantic in attr_map:
+            rows = decoded.get(semantic)
+            acc_index = prim_attrs.get(semantic)
+            if not rows or semantic.startswith("JOINTS_") or acc_index is None:
+                continue
+            if not isinstance(rows[0][0], int) or acc_index >= len(accessors):
+                continue
+            acc = accessors[acc_index]
+            if not acc.get("normalized"):
+                continue
+            divisor = _NORMALIZE_DIVISORS.get(acc.get("componentType"))
+            if divisor:
+                decoded[semantic] = [
+                    tuple(max(c / divisor, -1.0) for c in row) for row in rows
+                ]
         return decoded
 
     # --- skins ---------------------------------------------------------------

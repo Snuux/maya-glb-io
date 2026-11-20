@@ -36,7 +36,7 @@ import traceback
 
 PLUGIN_NAME = "maya_glb_io"          # the .py file in plug-ins/ (without extension)
 MODULE_NAME = "maya_glb_io"          # name used in the .mod file
-MODULE_VERSION = "1.0.4"
+MODULE_VERSION = "1.1.0"
 
 
 def _repo_root():

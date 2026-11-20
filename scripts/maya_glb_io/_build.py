@@ -39,6 +39,7 @@ import maya.api.OpenMayaAnim as oma
 from maya import cmds
 
 from maya_glb_io import _materials
+from maya_glb_io import _names
 from maya_glb_io._gltf import Gltf
 from maya_glb_io._materials import _common as MC
 
@@ -145,6 +146,7 @@ def build_scene(gltf, source_path, options=None):
         materials = _materials.build_materials(
             gltf, image_paths, node_prefix, target=target
         )
+        _remember_material_names(gltf, materials)
 
     doc = gltf.doc
     scene_index = doc.get("scene", 0)
@@ -277,6 +279,11 @@ def build_scene(gltf, source_path, options=None):
             t for t in top_transforms
             if t and cmds.objExists(t)
         ]
+
+    # Names Maya could not hold ("Bone.001", "mixamorig:Hips", non-ASCII) stay
+    # on the node so an export writes them back. Done here, after the collapse
+    # and skin passes, so the Maya name recorded next to it is the final one.
+    _remember_node_names(gltf, node_to_maya)
 
     # Animation pass — key the imported transforms/joints from the glTF
     # samplers. No-op when the document has no animations (the Anno building
@@ -572,9 +579,20 @@ def _extract_images(gltf, name_prefix):
 
     paths = []
     for i, img in enumerate(images):
-        data, _mime, ext = gltf.get_image_bytes(i)
-
         uri = img.get("uri") or ""
+        try:
+            data, _mime, ext = gltf.get_image_bytes(i)
+        except Exception as exc:
+            # A texture file that is not next to the .gltf must not stop the
+            # import: the geometry, skin and animation are all still there.
+            # The file node keeps the path the image would have had.
+            om.MGlobal.displayWarning(
+                "[glb_io] image %d (%s) could not be read, its texture is "
+                "missing: %s" % (i, uri or img.get("name") or "embedded", exc)
+            )
+            data = None
+            ext = os.path.splitext(uri)[1] if not uri.startswith("data:") else ""
+
         if uri and not uri.startswith("data:"):
             out_name = os.path.basename(uri)
         else:
@@ -582,7 +600,7 @@ def _extract_images(gltf, name_prefix):
             out_name = "{0}_{1}{2}".format(name_prefix, MC.sanitize(img_name), ext)
 
         out_path = os.path.join(sourceimages_dir, out_name)
-        if not os.path.isfile(out_path):
+        if data is not None and not os.path.isfile(out_path):
             with open(out_path, "wb") as f:
                 f.write(data)
         paths.append(out_path)
@@ -1014,6 +1032,7 @@ def _build_primitive(gltf, prim, name, materials, parent,
     # decoded arrays. Non-Draco primitives skip this entirely and behave exactly
     # as before.
     draco_uvs = None  # decoded [(u, v), ...] when Draco carries TEXCOORD_0
+    decoded = None    # every decoded attribute of a Draco primitive
     if gltf.primitive_has_draco(prim):
         # Lazily ensure the DracoPy decoder is available — this is the only
         # Maya-side trigger, and only fires when a Draco primitive is actually
@@ -1021,8 +1040,9 @@ def _build_primitive(gltf, prim, name, materials, parent,
         from maya_glb_io import _draco
         if not _draco.ensure_dracopy():
             om.MGlobal.displayWarning(
-                "[glb_io] Draco-compressed primitive '%s' skipped — could not "
-                "decode; install DracoPy (mayapy -m pip install DracoPy)" % name
+                "[glb_io] Draco-compressed primitive '%s' skipped: the DracoPy "
+                "decoder is not installed (GLB I/O menu > Install Draco Decoder, "
+                "or maya_glb_io.commands.install_draco())" % name
             )
             return
         try:
@@ -1158,8 +1178,21 @@ def _build_primitive(gltf, prim, name, materials, parent,
             if jname not in attrs or wname not in attrs:
                 break
             try:
-                joint_indices.append(gltf.read_accessor(attrs[jname]))
-                weight_values.append(gltf.read_accessor(attrs[wname]))
+                if decoded is not None:
+                    # The accessors of a Draco primitive hold no data: weights
+                    # come from the stream, in its vertex order like POSITION.
+                    if not decoded.get(jname) or not decoded.get(wname):
+                        om.MGlobal.displayWarning(
+                            "[glb_io] '%s': the Draco stream carries no %s/%s; "
+                            "the mesh is imported without skinning"
+                            % (name, jname, wname)
+                        )
+                        break
+                    joint_indices.append(decoded[jname])
+                    weight_values.append(decoded[wname])
+                else:
+                    joint_indices.append(gltf.read_accessor(attrs[jname]))
+                    weight_values.append(gltf.read_accessor(attrs[wname]))
             except Exception as e:
                 om.MGlobal.displayWarning(
                     "[glb_io] failed to decode %s/%s on '%s': %s"
@@ -1237,14 +1270,17 @@ def _build_morph_targets(gltf, prim, name, parent, shape_path, base_points,
 
     target_transforms = []  # temp world-level transforms holding target meshes
     alias_names = []        # the desired weight alias per target, in order
+    gltf_names = []         # the glTF name per target ("" when it has none)
 
     for ti, target in enumerate(targets):
         deltas = target.get("POSITION")
         # Desired weight alias for this target.
         if ti < len(target_names) and target_names[ti]:
             alias = MC.sanitize(str(target_names[ti]))
+            gltf_names.append(str(target_names[ti]))
         else:
             alias = "target%d" % ti
+            gltf_names.append("")
         alias_names.append(alias)
 
         # base + delta points for this target.
@@ -1307,6 +1343,7 @@ def _build_morph_targets(gltf, prim, name, parent, shape_path, base_points,
     # to a clean, stable alias keeps the weight-animation applier and the user
     # UI tidy. weight[i] is the i-th target in the order we passed them.
     _rename_blendshape_aliases(bs_node, alias_names)
+    _remember_target_names(bs_node, gltf_names)
 
     # Apply default weights (node override or mesh weights). Missing entries
     # stay at Maya's default of 0.
@@ -1321,6 +1358,45 @@ def _build_morph_targets(gltf, prim, name, parent, shape_path, base_points,
     # applier can resolve a `weights` channel back to it.
     if node_to_blendshape is not None and node_index is not None:
         node_to_blendshape.setdefault(node_index, []).append(bs_node)
+
+
+def _remember_node_names(gltf, node_to_maya):
+    """Keep each glTF node name its Maya node could not take (see _names)."""
+    nodes = gltf.doc.get("nodes") or []
+    for node_index, maya_node in node_to_maya.items():
+        if node_index < 0 or node_index >= len(nodes):
+            continue
+        _names.remember(maya_node, nodes[node_index].get("name"))
+
+
+def _remember_material_names(gltf, materials):
+    """Keep each glTF material name on its shader. The exporter names a
+    material after its shader without the importer's _SHD suffix, so that is
+    the name the glTF one is compared with."""
+    docs = gltf.doc.get("materials") or []
+    for index, entry in enumerate(materials):
+        if not entry or not entry[0] or index >= len(docs):
+            continue
+        shader = entry[0]
+        maya_name = _names.short_name(shader)
+        if maya_name.endswith("_SHD") and len(maya_name) > 4:
+            maya_name = maya_name[:-4]
+        _names.remember(shader, docs[index].get("name"), maya_name=maya_name)
+
+
+def _remember_target_names(bs_node, gltf_names):
+    """Keep the glTF morph target names under the aliases Maya really gave."""
+    by_alias = {}
+    for index, name in enumerate(gltf_names):
+        if not name:
+            continue
+        try:
+            alias = cmds.aliasAttr("%s.weight[%d]" % (bs_node, index), query=True)
+        except Exception:
+            alias = None
+        if alias:
+            by_alias[alias] = name
+    _names.remember_targets(bs_node, by_alias)
 
 
 def _rename_blendshape_aliases(bs_node, alias_names):

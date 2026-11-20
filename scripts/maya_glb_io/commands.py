@@ -273,6 +273,18 @@ def show_material_variants_dialog():
     _options_ui.show_variants_window()
 
 
+def install_draco():
+    """Install the DracoPy decoder now, without dialogs. For scripts.
+
+    Returns (ok, text): the folder it went to, or pip's output on failure. It
+    lands in the plug-in's own `draco/py<XY>` folder (see _draco.vendor_dir).
+    """
+    from maya_glb_io import _draco
+    if _draco.dracopy_available():
+        return True, "already installed"
+    return _draco.install()
+
+
 def install_draco_decoder():
     """Pre-install the DracoPy decoder (one-time) with user feedback.
 
@@ -301,14 +313,17 @@ def install_draco_decoder():
     )
     if proceed != "Install":
         return False
-    ok = _draco.ensure_dracopy()
+    ok, text = _draco.install()
+    if not ok:
+        om.MGlobal.displayWarning("[glb_io] DracoPy install failed:\n%s" % text)
     cmds.confirmDialog(
         title="Draco Decoder",
         message=("DracoPy installed — Draco / compressed glTFs will now import."
                  if ok else
                  "Install failed (offline or pip blocked). See the Script Editor "
                  "for details. You can install manually in a terminal with:\n\n"
-                 "  mayapy -m pip install DracoPy"),
+                 "  mayapy -m pip install --target \"%s\" DracoPy"
+                 % _draco.vendor_dir()),
         button=["OK"],
     )
     return ok

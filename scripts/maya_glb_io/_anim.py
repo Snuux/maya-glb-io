@@ -12,13 +12,20 @@ Conventions mirrored from _build.py:
     degrees via om.MQuaternion(...).asEulerRotation(), exactly like _apply_trs.
   * scale samples are keyed verbatim (scale is unitless).
 
-Known limitations (v1):
-  * Euler conversion of per-key quaternions can introduce gimbal/axis flips
-    between adjacent keys (no quaternion-curve unrolling). The rotateOrder of
-    the target node is respected but euler discontinuities are not smoothed.
-  * CUBICSPLINE tangents are NOT reconstructed: we key the value element of
-    each (in-tangent, value, out-tangent) triple with spline/auto tangents.
-    This applies to morph `weights` channels too — the value element is keyed.
+Rotation:
+  Each key's quaternion becomes the euler solution closest to the key before
+  it (MEulerRotation.setToClosestSolution), so curves stay continuous instead
+  of jumping between equivalent angles. Maya interpolates the three euler
+  curves, glTF the quaternion: between two keys far apart the paths differ,
+  on per-frame samples (what exporters write) they do not.
+
+CUBICSPLINE:
+  * translation, scale and morph weights keep the file's tangents: every key
+    gets fixed in and out tangents with the glTF slopes (units per second,
+    turned into Maya's per-frame angles), which gives the same Hermite curve.
+  * rotation tangents are quaternion derivatives, which an euler curve cannot
+    hold. The spline is evaluated at every whole frame between its keys and
+    keyed there with linear tangents.
 
 Several animations:
   Maya has one timeline, so every animation is keyed on it. When the file's
@@ -295,13 +302,34 @@ def _apply_channel(channel, node_to_maya, coord_convert, fps,
     if attrs is None:
         return False
 
+    if cubic:
+        n_keys = min(n_keys, len(values) // 3)
+        if path == "rotation":
+            # Quaternion tangents have no euler counterpart: sample the spline.
+            times, values = _sample_cubic_rotation(times, values, n_keys, fps)
+            n_keys = len(times)
+            cubic = False
+            interp = "LINEAR"
+
     set_any = False
     prev_euler = None  # rotation continuity (euler unrolling) — see below
+    frames = []
+    slopes_in = ([], [], [])   # per axis, value units per second (CUBICSPLINE)
+    slopes_out = ([], [], [])
     for ki in range(n_keys):
         frame = _frame(times[ki], fps, offset)
 
         if cubic:
             value = values[ki * 3 + 1]
+            tan_in = values[ki * 3]
+            tan_out = values[ki * 3 + 2]
+            if path == "translation":
+                tan_in = _convert_delta(coord_convert, tan_in)
+                tan_out = _convert_delta(coord_convert, tan_out)
+            frames.append(frame)
+            for axis in range(3):
+                slopes_in[axis].append(tan_in[axis])
+                slopes_out[axis].append(tan_out[axis])
         else:
             if ki >= len(values):
                 break
@@ -344,20 +372,116 @@ def _apply_channel(channel, node_to_maya, coord_convert, fps,
     if interp == "STEP":
         itt, ott = "linear", "step"
     elif cubic:
-        # No exact tangent reconstruction in v1 — use spline tangents so the
-        # curve is at least smooth through the keyed values.
-        itt, ott = "spline", "spline"
+        for axis, attr in enumerate(attrs):
+            _set_cubic_tangents(
+                node, attr, frames, slopes_in[axis], slopes_out[axis], fps
+            )
+        return True
     else:  # LINEAR (and unknown -> default linear)
         itt, ott = "linear", "linear"
 
+    # Only this channel's keys: another animation of the file may have keyed
+    # the same attribute with another interpolation.
+    span = frames_of(times, fps, offset)
     for attr in attrs:
         try:
-            cmds.keyTangent(node, edit=True, attribute=attr, itt=itt, ott=ott)
+            cmds.keyTangent(node, edit=True, attribute=attr, time=span,
+                            itt=itt, ott=ott)
         except Exception:
             # Tangent setting is cosmetic; never let it fail the channel.
             pass
 
     return True
+
+
+def frames_of(times, fps, offset=0.0):
+    """(first, last) frame of a channel's keys, as a keyTangent time range."""
+    return (_frame(times[0], fps, offset), _frame(times[-1], fps, offset))
+
+
+def _convert_delta(coord_convert, vector):
+    """A direction (a tangent) through coord_convert. The convert is linear
+    (unit scale, axis swap), so the difference of two converted points is the
+    converted direction, whatever offset a convert might add."""
+    zero = coord_convert((0.0, 0.0, 0.0))
+    moved = coord_convert((vector[0], vector[1], vector[2]))
+    return (moved[0] - zero[0], moved[1] - zero[1], moved[2] - zero[2])
+
+
+def _set_cubic_tangents(node, attr, frames, slopes_in, slopes_out, fps):
+    """Give each key of a CUBICSPLINE channel the file's tangents.
+
+    glTF's cubic Hermite spline and a Maya curve with non-weighted fixed
+    tangents are the same curve when the slopes match. glTF slopes are value
+    units per second; Maya's tangent angle is atan(value units per frame).
+    """
+    try:
+        cmds.keyTangent(node, attribute=attr, edit=True, weightedTangents=False)
+    except Exception:
+        pass
+    for frame, slope_in, slope_out in zip(frames, slopes_in, slopes_out):
+        try:
+            cmds.keyTangent(node, attribute=attr, edit=True, time=(frame,),
+                            lock=False, itt="fixed", ott="fixed")
+            cmds.keyTangent(
+                node, attribute=attr, edit=True, time=(frame,),
+                inAngle=math.degrees(math.atan(slope_in / fps)),
+                outAngle=math.degrees(math.atan(slope_out / fps)),
+            )
+        except Exception:
+            # Tangent setting is cosmetic; never let it fail the channel.
+            pass
+
+
+def _sample_cubic_rotation(times, values, n_keys, fps):
+    """A CUBICSPLINE rotation channel as plain keys: the file's keys plus the
+    spline's value at every whole frame between them, each a unit quaternion.
+
+    Follows the glTF spec: with d = t1 - t0 and s = (t - t0) / d,
+      q = (2s^3 - 3s^2 + 1) v0 + (s^3 - 2s^2 + s) d b0
+        + (-2s^3 + 3s^2) v1 + (s^3 - s^2) d a1
+    where b0 is key 0's out-tangent and a1 key 1's in-tangent, then normalized.
+    """
+    out_times = []
+    out_values = []
+    for ki in range(n_keys):
+        v0 = values[ki * 3 + 1]
+        out_times.append(times[ki])
+        out_values.append(_unit(v0))
+        if ki + 1 >= n_keys:
+            break
+        t0 = times[ki]
+        t1 = times[ki + 1]
+        d = t1 - t0
+        if d <= 0.0:
+            continue
+        b0 = values[ki * 3 + 2]
+        v1 = values[(ki + 1) * 3 + 1]
+        a1 = values[(ki + 1) * 3]
+        frame = math.floor(t0 * fps + _WHOLE_FRAME) + 1
+        while frame < t1 * fps - _WHOLE_FRAME:
+            t = frame / fps
+            s = (t - t0) / d
+            s2 = s * s
+            s3 = s2 * s
+            h00 = 2 * s3 - 3 * s2 + 1
+            h10 = (s3 - 2 * s2 + s) * d
+            h01 = -2 * s3 + 3 * s2
+            h11 = (s3 - s2) * d
+            out_times.append(t)
+            out_values.append(_unit([
+                h00 * v0[c] + h10 * b0[c] + h01 * v1[c] + h11 * a1[c]
+                for c in range(4)
+            ]))
+            frame += 1
+    return out_times, out_values
+
+
+def _unit(quaternion):
+    length = math.sqrt(sum(c * c for c in quaternion))
+    if length < 1e-12:
+        return (0.0, 0.0, 0.0, 1.0)
+    return tuple(c / length for c in quaternion)
 
 
 def _apply_weights_channel(channel, node, fps, node_to_blendshape, offset=0.0):
@@ -417,13 +541,20 @@ def _apply_weights_channel(channel, node, fps, node_to_blendshape, offset=0.0):
             )
             continue
 
+        # CUBICSPLINE output is keyframe-major, then in / value / out blocks
+        # of N weights each: [in x N, value x N, out x N] per key.
+        frames = []
+        slopes_in = [[] for _ in range(n_targets)]
+        slopes_out = [[] for _ in range(n_targets)]
         for ki in range(n_keys):
             frame = _frame(times[ki], fps, offset)
+            frames.append(frame)
             for t in range(n_targets):
                 if cubic:
-                    # (in, value, out) triple per target per key; take value.
-                    base = (ki * n_targets + t) * 3
-                    w = values[base + 1]
+                    base = ki * n_targets * 3
+                    w = values[base + n_targets + t]
+                    slopes_in[t].append(values[base + t])
+                    slopes_out[t].append(values[base + 2 * n_targets + t])
                 else:
                     w = values[ki * n_targets + t]
                 try:
@@ -439,13 +570,18 @@ def _apply_weights_channel(channel, node, fps, node_to_blendshape, offset=0.0):
         if interp == "STEP":
             itt, ott = "linear", "step"
         elif cubic:
-            itt, ott = "spline", "spline"
+            for t in range(n_targets):
+                _set_cubic_tangents(
+                    bs, "weight[%d]" % t, frames, slopes_in[t], slopes_out[t], fps
+                )
+            continue
         else:
             itt, ott = "linear", "linear"
         for t in range(n_targets):
             try:
                 cmds.keyTangent(
-                    bs, edit=True, attribute="weight[%d]" % t, itt=itt, ott=ott
+                    bs, edit=True, attribute="weight[%d]" % t,
+                    time=(frames[0], frames[-1]), itt=itt, ott=ott
                 )
             except Exception:
                 pass

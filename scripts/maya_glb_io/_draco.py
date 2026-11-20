@@ -5,24 +5,34 @@ Blender (with "Compression" on), the glTF-Pipeline, etc. ship their vertex
 data as a Draco bitstream referenced by `KHR_draco_mesh_compression` instead of
 plain accessors, so without a Draco decoder those meshes import EMPTY.
 
-We decode via the `DracoPy` pip package — a self-contained C++/Cython wheel
+We decode via the `DracoPy` pip package, a self-contained C++/Cython wheel
 (NOT a Maya module), so this whole layer runs in the same Maya-free space as
-_gltf.py once DracoPy is installed. The ONLY Maya-side piece is the lazy
-auto-install (`ensure_dracopy`), which shells `mayapy -m pip install` exactly
-like the addon's Pillow installer — but everything here degrades gracefully and
-NEVER raises on a missing/uninstallable dependency: callers check the bool and
-warn+skip.
+_gltf.py once DracoPy is there. Nothing here raises on a missing decoder:
+callers check the bool and warn+skip.
+
+The decoder is installed into the plug-in's own folder, `draco/py<XY>` next
+to `scripts` (one folder per Python version, since the wheel is built per
+version), not into Maya's site-packages: no admin rights, nothing left behind
+when the plug-in is removed, and several Maya versions can share one copy of
+the plug-in. A DracoPy already importable from elsewhere is used as it is.
 
 API:
   dracopy_available() -> bool   : is DracoPy importable right now?
   ensure_dracopy()    -> bool   : importable, or installed-then-importable
-  decode(buffer_bytes) -> dict  : normalized {"POSITION", "NORMAL",
-                                  "TEXCOORD_0", "indices"} (None for absent
-                                  optional attributes). Raises DracoError if
-                                  DracoPy is unavailable or the buffer is bad.
+                                  (never installs with MAYA_GLB_IO_OFFLINE=1)
+  install(python=None) -> (bool, str) : run pip now, whatever the environment
+                                  says; what `Install Draco Decoder` and
+                                  scripted installs call
+  vendor_dir()        -> str    : where the decoder goes for this Python
+  decode(buffer_bytes, attributes=None) -> dict : POSITION, NORMAL,
+                                  TEXCOORD_0, indices, plus every semantic of
+                                  the extension's `attributes` table
+                                  (JOINTS_0, WEIGHTS_0, COLOR_0, ...). Raises
+                                  DracoError if DracoPy is unavailable or the
+                                  buffer is bad.
 
 This module deliberately has NO top-level `import DracoPy` and NO `import maya`
-— both are imported lazily inside the functions so _gltf can import _draco
+: both are imported lazily inside the functions so _gltf can import _draco
 (and the smoke tests can import both) without either dependency present.
 """
 from __future__ import annotations
@@ -55,9 +65,30 @@ def _warn(msg):
         print("[glb_io] " + msg)
 
 
+PACKAGE = "DracoPy"
+PIP_SECONDS = 300
+
+
+def vendor_dir():
+    # type: () -> str
+    """The folder this Python's decoder is installed into: `draco/py<XY>` in
+    the plug-in folder (the parent of `scripts`)."""
+    scripts = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tag = "py%d%d" % (sys.version_info[0], sys.version_info[1])
+    return os.path.join(os.path.dirname(scripts), "draco", tag)
+
+
+def _use_vendor_dir():
+    path = vendor_dir()
+    if os.path.isdir(path) and path not in sys.path:
+        sys.path.append(path)
+        importlib.invalidate_caches()
+
+
 def dracopy_available():
     # type: () -> bool
     """True if `import DracoPy` succeeds in the current interpreter."""
+    _use_vendor_dir()
     try:
         import DracoPy  # noqa: F401
         return True
@@ -65,90 +96,140 @@ def dracopy_available():
         return False
 
 
-def ensure_dracopy():
-    # type: () -> bool
-    """Make DracoPy importable, pip-installing it into THIS interpreter if needed.
+def python_executable():
+    # type: () -> str
+    """The Python that can run pip for this interpreter.
 
-    Flow (mirrors the addon's Pillow auto-installer):
-      1. If DracoPy already imports, return True immediately (fast path — does
-         NOT slow non-Draco imports because callers only reach here on a Draco
-         primitive).
-      2. Otherwise run `<this-python> -m pip install --user DracoPy`. Inside
-         Maya, sys.executable is mayapy, so the wheel lands in Maya's user
-         site-packages and becomes importable without a restart. If `--user`
-         fails (e.g. a venv where user-site is disabled), retry WITHOUT it.
-      3. Invalidate import caches and retry the import.
-
-    Returns True on success, False on any failure (offline, pip blocked, no
-    matching wheel for this Python). NEVER raises — the caller warns + skips.
+    In mayapy that is sys.executable. In a Maya with a window sys.executable
+    is maya itself, and `maya -m pip` would start a second Maya: use the
+    mayapy that sits next to it.
     """
-    if dracopy_available():
-        return True
-    # MAYA_GLB_IO_OFFLINE=1: never run pip, the caller warns and skips.
-    if os.environ.get("MAYA_GLB_IO_OFFLINE"):
-        return False
+    exe = sys.executable or ""
+    folder, name = os.path.split(exe)
+    stem = os.path.splitext(name)[0].lower()
+    if stem.startswith("mayapy") or stem.startswith("python"):
+        return exe
+    for candidate in ("mayapy.exe", "mayapy"):
+        path = os.path.join(folder, candidate)
+        if os.path.isfile(path):
+            return path
+    return exe
 
+
+def install(python=None):
+    # type: (str) -> tuple
+    """Install the decoder into vendor_dir() with pip. Needs internet.
+
+    Returns (ok, text): `text` is pip's output on failure, the place it went
+    to on success. Never raises. Runs whatever MAYA_GLB_IO_OFFLINE says: this
+    is the explicit request, ensure_dracopy() is the automatic one.
+
+    When the plug-in folder cannot be written (a studio-wide install), pip is
+    run again with --user, into the user's site-packages.
+    """
     import subprocess
 
+    target = vendor_dir()
+    base = [
+        python or python_executable(), "-m", "pip", "install",
+        "--disable-pip-version-check", "--upgrade",
+    ]
+    attempts = (
+        (base + ["--target", target, PACKAGE], target),
+        (base + ["--user", PACKAGE], "the user's site-packages"),
+    )
     creationflags = 0
     if sys.platform == "win32":
         # Don't pop a console window when launched from Maya's GUI.
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-    _warn(
-        "Draco-compressed mesh found; installing the DracoPy decoder via: "
-        "%s -m pip install --user DracoPy (one-time, needs internet)..."
-        % sys.executable
-    )
-
-    # Try --user first (lands in the user site, doesn't need admin), then a
-    # plain install as a fallback for environments where --user is rejected.
-    attempts = (
-        [sys.executable, "-m", "pip", "install", "--user", "DracoPy"],
-        [sys.executable, "-m", "pip", "install", "DracoPy"],
-    )
-
-    installed = False
-    last_output = ""
-    for cmd in attempts:
+    output = ""
+    for command, place in attempts:
         try:
             res = subprocess.run(
-                cmd,
+                command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 universal_newlines=True,   # text mode, 3.6-compatible spelling
                 creationflags=creationflags,
-                timeout=300,               # 5 min hard limit
+                timeout=PIP_SECONDS,
             )
         except Exception as exc:
-            last_output = "could not launch pip: %s" % exc
+            output = "could not launch pip (%s): %s" % (" ".join(command), exc)
             continue
-        last_output = res.stdout or ""
-        if res.returncode == 0:
-            installed = True
-            break
+        if res.returncode != 0:
+            output = (res.stdout or "")[-1500:]
+            continue
+        importlib.invalidate_caches()
+        if dracopy_available():
+            return True, place
+        output = (
+            "pip reported success but `import DracoPy` still fails from %s"
+            % place
+        )
+    return False, output
 
-    if not installed:
+
+def ensure_dracopy():
+    # type: () -> bool
+    """Make DracoPy importable, installing it into vendor_dir() if needed.
+
+    Returns True at once when DracoPy already imports (callers only reach
+    here on a Draco primitive, so other imports never pay for it). Returns
+    False without trying when MAYA_GLB_IO_OFFLINE is set, and on any failure
+    (offline, pip blocked, no wheel for this Python). NEVER raises: the caller
+    warns + skips.
+    """
+    if dracopy_available():
+        return True
+    if os.environ.get("MAYA_GLB_IO_OFFLINE"):
+        return False
+
+    _warn(
+        "Draco-compressed mesh found; installing the DracoPy decoder into %s "
+        "(one-time, needs internet)..." % vendor_dir()
+    )
+    ok, text = install()
+    if not ok:
         _warn(
             "DracoPy install failed (offline or pip blocked?). "
             "Draco-compressed meshes will be skipped. Install it manually with:"
-            "  %s -m pip install DracoPy\npip output:\n%s"
-            % (sys.executable, (last_output or "")[-1500:])
+            "  %s -m pip install --target \"%s\" DracoPy\npip output:\n%s"
+            % (python_executable(), vendor_dir(), text)
         )
         return False
+    _warn("DracoPy installed and importable; decoding Draco meshes.")
+    return True
 
-    # Fresh files just landed in site-packages — clear the import caches so the
-    # interpreter sees the new package without a restart, then retry.
-    importlib.invalidate_caches()
-    if dracopy_available():
-        _warn("DracoPy installed and importable; decoding Draco meshes.")
-        return True
 
-    _warn(
-        "pip reported success but `import DracoPy` still fails. "
-        "Try restarting Maya. Draco meshes skipped for now."
-    )
-    return False
+def _rows(arr, integers=False):
+    """A decoded generic attribute (an N x K array) as a list of tuples."""
+    try:
+        rows = arr.tolist()
+    except AttributeError:
+        rows = list(arr)
+    cast = int if integers else float
+    out = []
+    for row in rows:
+        if isinstance(row, (list, tuple)):
+            out.append(tuple(cast(v) for v in row))
+        else:
+            out.append((cast(row),))
+    return out
+
+
+def _by_unique_id(mesh, unique_id):
+    """The array of the Draco attribute with this unique id, or None (older
+    DracoPy has no such lookup, and an id may simply be absent)."""
+    getter = getattr(mesh, "get_attribute_by_unique_id", None)
+    if getter is None:
+        return None
+    try:
+        found = getter(int(unique_id))
+    except Exception:
+        return None
+    if not isinstance(found, dict):
+        return None
+    return found.get("data")
 
 
 def _to_xyz_list(arr):
@@ -230,26 +311,34 @@ def _to_index_list(faces):
     return [int(v) for v in faces]
 
 
-def decode(buffer_bytes):
-    # type: (bytes) -> dict
+def decode(buffer_bytes, attributes=None):
+    # type: (bytes, dict) -> dict
     """Decode a Draco bitstream into normalized glTF-semantic arrays.
 
+    `attributes` is the extension's table {glTF semantic: Draco unique id}.
     Returns a dict:
       {
         "POSITION":   [(x, y, z), ...],     # always present on a valid mesh
         "NORMAL":     [(x, y, z), ...] | None,
         "TEXCOORD_0": [(u, v), ...]   | None,
         "indices":    [i, i, i, ...],       # flat triangle list
+        "JOINTS_0":   [(j, j, j, j), ...],  # every other semantic of the table
+        "WEIGHTS_0":  [(w, w, w, w), ...],  # the stream really carries
+        ...
       }
 
-    POSITION/NORMAL/TEXCOORD_0 are mapped from DracoPy's typed accessors
-    (.points / .normals / .tex_coord), which resolve the Draco attributes by
-    semantic type — exactly the mapping the glTF extension's `attributes` table
-    expresses (glTF semantic -> Draco attribute id). Optional attributes the
-    stream doesn't carry come back as None.
+    Every attribute of one stream is in the same decoded vertex order, so rows
+    of JOINTS_0 / WEIGHTS_0 line up with POSITION. Integer components come back
+    as they are stored: scaling a normalized accessor is the caller's job
+    (_gltf.decode_draco_primitive knows the accessor).
+
+    With no table, or a DracoPy too old to look attributes up by id,
+    POSITION / NORMAL / TEXCOORD_0 are resolved by type and nothing else is
+    returned.
 
     Raises DracoError if DracoPy isn't importable or the buffer fails to decode.
     """
+    _use_vendor_dir()
     try:
         import DracoPy
     except Exception as exc:
@@ -263,18 +352,39 @@ def decode(buffer_bytes):
     except Exception as exc:
         raise DracoError("DracoPy failed to decode Draco buffer: %s" % exc)
 
-    points = getattr(mesh, "points", None)
+    attributes = attributes or {}
+    typed = {
+        "POSITION": getattr(mesh, "points", None),
+        "NORMAL": getattr(mesh, "normals", None),
+        "TEXCOORD_0": getattr(mesh, "tex_coord", None),
+    }
+    for semantic in typed:
+        if semantic in attributes:
+            data = _by_unique_id(mesh, attributes[semantic])
+            if data is not None:
+                typed[semantic] = data
     faces = getattr(mesh, "faces", None)
-    normals = getattr(mesh, "normals", None)
-    tex = getattr(mesh, "tex_coord", None)
 
-    if points is None:
+    if typed["POSITION"] is None:
         raise DracoError("decoded Draco stream has no POSITION data")
 
+    normals = typed["NORMAL"]
+    tex = typed["TEXCOORD_0"]
     result = {
-        "POSITION": _to_xyz_list(points),
+        "POSITION": _to_xyz_list(typed["POSITION"]),
         "NORMAL": _to_xyz_list(normals) if normals is not None else None,
         "TEXCOORD_0": _to_uv_list(tex) if tex is not None else None,
         "indices": _to_index_list(faces) if faces is not None else [],
     }
+    for semantic, unique_id in attributes.items():
+        if semantic in result:
+            continue
+        data = _by_unique_id(mesh, unique_id)
+        if data is None:
+            continue
+        try:
+            integers = data.dtype.kind in "iu"
+        except AttributeError:
+            integers = semantic.startswith("JOINTS_")
+        result[semantic] = _rows(data, integers=integers)
     return result

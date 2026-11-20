@@ -54,6 +54,7 @@ EXPORT_DEFAULTS = {
     "copyTextures":    (True,         "bool"),  # in reference mode, copy next to output
     "exportSkin":      (True,         "bool"),  # write skinClusters as glTF skins
     "exportAnimation": (True,         "bool"),  # write keyframes as glTF animations
+    "reduceKeys":      (True,         "bool"),  # drop keys interpolation reproduces
 }
 
 

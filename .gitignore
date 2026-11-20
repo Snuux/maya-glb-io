@@ -47,6 +47,9 @@ Desktop.ini
 # Dev / test artifacts (keep the source — only ignore generated output)
 # ---------------------------------------------------------------------------
 _dev/_smoke_out/
+
+# The DracoPy decoder, installed here by the plug-in (one folder per Python).
+/draco/
 **/sourceimages/
 
 # Large binary test assets are not shipped in the repo. Keep the folder but
