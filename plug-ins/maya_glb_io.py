@@ -134,6 +134,9 @@ def initializePlugin(plugin_mobject):
         )
 
     # One-time, throttled, fail-silent "newer version available" check.
+    # MAYA_GLB_IO_OFFLINE=1 keeps the plug-in off the network.
+    if os.environ.get("MAYA_GLB_IO_OFFLINE"):
+        return
     try:
         import maya.utils
         from maya_glb_io import _update_check

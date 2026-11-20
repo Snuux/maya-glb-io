@@ -28,6 +28,7 @@ This module deliberately has NO top-level `import DracoPy` and NO `import maya`
 from __future__ import annotations
 
 import importlib
+import os
 import sys
 
 
@@ -83,6 +84,9 @@ def ensure_dracopy():
     """
     if dracopy_available():
         return True
+    # MAYA_GLB_IO_OFFLINE=1: never run pip, the caller warns and skips.
+    if os.environ.get("MAYA_GLB_IO_OFFLINE"):
+        return False
 
     import subprocess
 
