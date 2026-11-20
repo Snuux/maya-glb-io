@@ -5,6 +5,18 @@ All notable changes to Maya GLB I/O are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.4] - 2026-11-20
+
+### Fixed
+- Import: a file whose animations overlap in time (most files: every animation starts at 0)
+  had them keyed on top of each other. They are now laid out one after another, in file
+  order, 10 frames apart. Animations that do not overlap keep their own frames.
+- Import: keys land on whole frames; 32-bit glTF times put them at 19.9999995 and the like.
+
+### Added
+- Import: a time slider bookmark per animation with its name and frames (option
+  `animationBookmarks`, on by default), and the animation range grows to hold them.
+
 ## [1.0.3] - 2026-11-20
 
 ### Fixed
