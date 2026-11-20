@@ -1258,19 +1258,17 @@ def _build_morph_targets(gltf, prim, name, parent, shape_path, base_points,
             else:
                 pts.append(om.MPoint(bp.x, bp.y, bp.z))
 
-        # Fresh standalone mesh (its own world-level transform) with the SAME
-        # topology as the base. MFnMesh.create with parent omitted makes a new
-        # transform + shape at the world root.
+        # Fresh standalone mesh with the SAME topology as the base, under a
+        # world-level transform made by cmds. MFnMesh.create is not undoable
+        # while the cmds.delete below is: a transform it made itself would come
+        # back on undo and stay. Undoing createNode removes the shape with it.
         try:
-            tgt_mfn = om.MFnMesh()
-            tgt_mfn.create(pts, poly_counts, poly_connects)
-            tgt_shape = tgt_mfn.fullPathName()
-            tgt_transform = cmds.listRelatives(
-                tgt_shape, parent=True, fullPath=True
-            )[0]
-            tgt_transform = cmds.rename(
-                tgt_transform, MC.sanitize(name + "_morph_%s" % alias)
+            tgt_transform = cmds.createNode(
+                "transform", name=MC.sanitize(name + "_morph_%s" % alias)
             )
+            tgt_mfn = om.MFnMesh()
+            tgt_mfn.create(pts, poly_counts, poly_connects,
+                           parent=_node_to_mobject(tgt_transform))
             target_transforms.append(_full_path(tgt_transform))
         except Exception as e:
             om.MGlobal.displayWarning(
