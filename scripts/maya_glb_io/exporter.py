@@ -33,6 +33,22 @@ Options (see _prefs.EXPORT_DEFAULTS):
                          object space.
     copyTextures  bool   in REFERENCE mode, copy each source texture next to the
                          output file and point the uri at the copy. Default on.
+    clips         list   [{"name", "start", "end"}, ...]: one glTF animation per
+                         entry, frames inclusive. Empty (default) = one animation
+                         over frameRange, or over the playback range.
+    frameRange    pair   (start, end) frames of the single animation when no
+                         clips are given. None = the playback range.
+    animationName str    name of the single animation. "" = scene name, or
+                         "take001" for an unsaved scene.
+
+Units: the Maya API (points, matrices, bindPreMatrix) works in centimetres
+whatever the scene's linear unit, so every length goes through one divisor,
+_resolve_unit_scale(): 100 to write metres, or the scene unit's size in cm when
+convertUnits is off (lengths then stay in scene units).
+
+Animation is sampled from each exported node's matrix every frame, so anything
+that moves a node counts: keys, constraints, IK, expressions, parents. Only
+channels that change are written.
 """
 from __future__ import annotations
 
@@ -133,9 +149,10 @@ def export_nodes(transforms, path, options=None):
 
     animations = []
     if export_anim:
-        anim = builder.build_animation()
-        if anim is not None and anim.channels:
-            animations = [anim]
+        for name, first, last in _animation_ranges(options):
+            anim = builder.build_animation(name, first, last)
+            if anim is not None and anim.channels:
+                animations.append(anim)
 
     nodes = builder.nodes
     meshes = builder.meshes
@@ -170,6 +187,7 @@ def export_nodes(transforms, path, options=None):
         "material_count": len(materials),
         "skin_count": len(skins),
         "animation_count": len(animations),
+        "animations": [a.name for a in animations],
     }
 
 
@@ -222,6 +240,11 @@ class _SceneBuilder(object):
                 if existing not in self.nodes[parent_node_index].children:
                     self.nodes[parent_node_index].children.append(existing)
             return existing
+
+        # Constraints, IK handles and effectors are rig machinery, not scene
+        # content: an engine would get empty nodes named after them.
+        if _is_rig_node(full):
+            return None
 
         node_index = len(self.nodes)
         node = GX.Node(name=_short_name(transform))
@@ -278,24 +301,9 @@ class _SceneBuilder(object):
         Translations are divided by unit_scale to convert Maya units -> metres.
         """
         try:
-            sel = om.MSelectionList()
-            sel.add(transform)
-            dag = sel.getDagPath(0)
-            if is_root:
-                # Full world transform.
-                m = dag.inclusiveMatrix()
-            else:
-                # local = world(self) * inverse(world(parent))
-                m = dag.inclusiveMatrix() * dag.exclusiveMatrixInverse()
-            tm = om.MTransformationMatrix(m)
-            t = tm.translation(om.MSpace.kTransform)
-            q = tm.rotation(asQuaternion=True)
-            s = tm.scale(om.MSpace.kTransform)
-            node.translation = (t.x / self.unit_scale,
-                                t.y / self.unit_scale,
-                                t.z / self.unit_scale)
-            node.rotation = (q.x, q.y, q.z, q.w)
-            node.scale = (s[0], s[1], s[2])
+            node.translation, node.rotation, node.scale = self._trs(
+                _dag_path(transform), is_root
+            )
         except Exception as exc:
             om.MGlobal.displayWarning(
                 "[glb_io] export: could not read transform '%s' (%s); "
@@ -304,6 +312,22 @@ class _SceneBuilder(object):
             node.translation = (0.0, 0.0, 0.0)
             node.rotation = (0.0, 0.0, 0.0, 1.0)
             node.scale = (1.0, 1.0, 1.0)
+
+    def _trs(self, dag, is_root):
+        """(translation, rotation quaternion, scale) of a node as glTF wants it:
+        the world matrix for a root, the matrix relative to its parent below."""
+        if is_root:
+            m = dag.inclusiveMatrix()
+        else:
+            m = dag.inclusiveMatrix() * dag.exclusiveMatrixInverse()
+        tm = om.MTransformationMatrix(m)
+        t = tm.translation(om.MSpace.kTransform)
+        q = tm.rotation(asQuaternion=True)
+        s = tm.scale(om.MSpace.kTransform)
+        us = self.unit_scale
+        return ((t.x / us, t.y / us, t.z / us),
+                (q.x, q.y, q.z, q.w),
+                (s[0], s[1], s[2]))
 
     def _build_mesh(self, transform, shape, mesh_node_index):
         # type: (str, str, int) -> Optional[GX.MeshDef]
@@ -857,10 +881,8 @@ class _SceneBuilder(object):
             if not ok:
                 continue
 
-            # IBMs: transpose Maya row-major -> glTF column-major and convert
-            # the translation row to metres (positions were exported in metres).
             ibms = [
-                _maya_rowmajor_to_gltf_ibm(m, self.unit_scale)
+                _gltf_ibm(m, self.unit_scale)
                 for m in job["bind_pre_matrices"]
             ]
 
@@ -898,48 +920,21 @@ class _SceneBuilder(object):
     # Animation sampling
     # -----------------------------------------------------------------------
 
-    def build_animation(self):
-        # type: () -> Optional[GX.AnimationDef]
-        """Sample TRS (and morph-weight) animation for every exported node that
-        has animCurves on its translate/rotate/scale channels, or whose mesh
-        carries an animated blendShape.
+    def build_animation(self, name, fmin, fmax):
+        # type: (str, float, float) -> Optional[GX.AnimationDef]
+        """Sample every exported node's TRS (and its mesh's blendShape weights)
+        at each integer frame from fmin to fmax, and keep the channels that
+        change.
 
-        Channels are sampled at integer frames over the scene's active playback
-        range. Only animated properties get channels (keeps files small). Times
-        are converted to seconds via the scene fps. Translation/scale -> VEC3
-        (translation divided by unit_scale -> metres); rotation -> VEC4
-        quaternion (x,y,z,w); morph weights -> a flat keyframe-major SCALAR
-        stream (N weights per keyframe), read after setting current time.
+        TRS comes from the same matrix decomposition as the rest pose
+        (_SceneBuilder._trs), so whatever moves a node is caught: keys,
+        constraints, IK, expressions, driven keys, animated parents. Times are
+        seconds from the scene fps; the first key sits at fmin / fps.
 
         Mutates current time while sampling; the original time is restored and
         viewport refresh suspended/resumed in a finally block.
         """
-        if not self.node_index_of:
-            return None
-
-        # Which nodes are animated, and on which TRS groups?
-        animated = []   # list of (transform_full_path, node_index, want_t, want_r, want_s)
-        for full, node_index in self.node_index_of.items():
-            want_t = _has_anim(full, ("translateX", "translateY", "translateZ"))
-            want_r = _has_anim(full, ("rotateX", "rotateY", "rotateZ"))
-            want_s = _has_anim(full, ("scaleX", "scaleY", "scaleZ"))
-            if want_t or want_r or want_s:
-                animated.append((full, node_index, want_t, want_r, want_s))
-
-        # Which exported MESH nodes have an animated blendShape? Map node_index
-        # -> (blendShape, [weight group indices]). Only when morph export is on.
-        morphed = {}  # node_index -> (bs_name, [group_indices])
-        if self.export_morph:
-            for full, node_index in self.node_index_of.items():
-                info = self._animated_blendshape_for_node(full)
-                if info:
-                    morphed[node_index] = info
-
-        if not animated and not morphed:
-            return None
-
-        fmin, fmax = _playback_range()
-        if fmax < fmin:
+        if not self.node_index_of or fmax < fmin:
             return None
         frames = list(range(int(round(fmin)), int(round(fmax)) + 1))
         if not frames:
@@ -947,39 +942,36 @@ class _SceneBuilder(object):
         fps = _scene_fps()
         times = [f / fps for f in frames]
 
-        anim_name = _scene_name() or "take001"
-        anim = GX.AnimationDef(name=anim_name, channels=[])
+        targets = []    # (dag path, node index, is root)
+        for full, node_index in self.node_index_of.items():
+            targets.append((_dag_path(full), node_index,
+                            node_index in self.root_node_indices))
+        morphed = {}    # node index -> (blendShape, [weight indices])
+        if self.export_morph:
+            for full, node_index in self.node_index_of.items():
+                info = self._blendshape_for_node(full)
+                if info:
+                    morphed[node_index] = info
 
+        samples = {ni: ([], [], []) for _dag, ni, _root in targets}
+        morph_samples = {ni: [] for ni in morphed}
         original_time = cmds.currentTime(query=True)
         try:
             try:
                 cmds.refresh(suspend=True)
             except Exception:
                 pass
-
-            # Per-node accumulators across frames.
-            samples = {}  # node_index -> {"t":[...], "r":[...], "s":[...]}
-            for _full, node_index, want_t, want_r, want_s in animated:
-                samples[node_index] = {"t": [], "r": [], "s": []}
-            # Morph weight accumulator: node_index -> flat keyframe-major list.
-            morph_samples = {ni: [] for ni in morphed}
-
             for f in frames:
                 cmds.currentTime(f, edit=True)
-                for full, node_index, want_t, want_r, want_s in animated:
+                for dag, node_index, is_root in targets:
+                    t, r, s = self._trs(dag, is_root)
                     rec = samples[node_index]
-                    if want_t:
-                        t = cmds.getAttr(full + ".translate")[0]
-                        rec["t"].append((t[0] / self.unit_scale,
-                                         t[1] / self.unit_scale,
-                                         t[2] / self.unit_scale))
-                    if want_r:
-                        q = _node_local_quat(full)
-                        rec["r"].append(q)
-                    if want_s:
-                        s = cmds.getAttr(full + ".scale")[0]
-                        rec["s"].append((s[0], s[1], s[2]))
-                # Morph weights — append this keyframe's N weights in order.
+                    rec[0].append(t)
+                    rotations = rec[1]
+                    if rotations and _dot(rotations[-1], r) < 0.0:
+                        r = (-r[0], -r[1], -r[2], -r[3])
+                    rotations.append(r)
+                    rec[2].append(s)
                 for node_index, (bs, groups) in morphed.items():
                     row = morph_samples[node_index]
                     for gi in groups:
@@ -999,41 +991,34 @@ class _SceneBuilder(object):
             except Exception:
                 pass
 
-        # Build channels from the samples.
-        for _full, node_index, want_t, want_r, want_s in animated:
-            rec = samples[node_index]
-            if want_t and rec["t"]:
-                anim.channels.append(GX.AnimChannelDef(
-                    node_index, "translation", list(times), rec["t"]
-                ))
-            if want_r and rec["r"]:
-                anim.channels.append(GX.AnimChannelDef(
-                    node_index, "rotation", list(times), rec["r"]
-                ))
-            if want_s and rec["s"]:
-                anim.channels.append(GX.AnimChannelDef(
-                    node_index, "scale", list(times), rec["s"]
-                ))
-
-        # Morph-weight channels: a flat keyframe-major SCALAR stream per node.
+        anim = GX.AnimationDef(name=name, channels=[])
+        for _dag, node_index, _root in targets:
+            node = self.nodes[node_index]
+            rest = (node.translation, node.rotation, node.scale)
+            for path, values, still in zip(("translation", "rotation", "scale"),
+                                           samples[node_index], rest):
+                # A channel that holds still but away from the rest pose is
+                # written too: without it the engine shows the rest pose.
+                if _changes([still] + values if still else values,
+                            path == "rotation"):
+                    anim.channels.append(GX.AnimChannelDef(
+                        node_index, path, list(times), values
+                    ))
         for node_index, flat in morph_samples.items():
-            if flat:
+            count = len(morphed[node_index][1])
+            rows = [tuple(flat[i:i + count]) for i in range(0, len(flat), count)]
+            if _changes(rows):
                 anim.channels.append(GX.AnimChannelDef(
                     node_index, "weights", list(times), flat
                 ))
-
         if not anim.channels:
             return None
         return anim
 
-    def _animated_blendshape_for_node(self, transform_full):
-        """If `transform_full` owns a mesh with an animated blendShape, return
-        (blendShape_name, [weight group indices]); else None.
-
-        A blendShape counts as animated if ANY of its weight[i] plugs is driven
-        by an animCurve. The group-index list is the weight multiIndices order
-        (= glTF morph-target order, matching how the mesh's targets are
-        exported)."""
+    def _blendshape_for_node(self, transform_full):
+        """(blendShape, [weight group indices]) of the mesh under
+        `transform_full`, or None. The index order is the glTF morph-target
+        order, matching how the mesh's targets are exported."""
         shape = _first_mesh_shape(transform_full)
         if shape is None:
             return None
@@ -1051,41 +1036,12 @@ class _SceneBuilder(object):
             groups = []
         if not groups:
             return None
-        # Animated if any weight[i] has an incoming animCurve.
-        any_anim = False
-        for gi in groups:
-            plug = "%s.weight[%d]" % (bs, gi)
-            try:
-                conns = cmds.listConnections(
-                    plug, source=True, destination=False, type="animCurve"
-                ) or []
-            except Exception:
-                conns = []
-            if conns:
-                any_anim = True
-                break
-        if not any_anim:
-            return None
         return (bs, list(groups))
 
 
 # ---------------------------------------------------------------------------
 # Transform helpers
 # ---------------------------------------------------------------------------
-
-def _local_rotation_quat(transform):
-    """Return the transform's LOCAL rotation as a glTF quaternion (x,y,z,w),
-    honoring its rotateOrder."""
-    try:
-        sel = om.MSelectionList()
-        sel.add(transform)
-        dag = sel.getDagPath(0)
-        fn = om.MFnTransform(dag)
-        q = fn.rotation(om.MSpace.kTransform, asQuaternion=True)
-        return (q.x, q.y, q.z, q.w)
-    except Exception:
-        return (0.0, 0.0, 0.0, 1.0)
-
 
 def _filter_to_roots(transforms):
     """Drop any transform that is a descendant of another in the list, so we
@@ -1158,48 +1114,80 @@ def _top_ancestor(node):
     return "|" + parts[0]
 
 
-def _maya_rowmajor_to_gltf_ibm(maya_flat16, unit_scale):
-    """Convert a Maya bindPreMatrix (16 floats, row-major) into a glTF
-    inverseBindMatrix (16 floats, column-major), with the translation row scaled
-    from Maya units to metres (divided by unit_scale) so the IBM operates in the
-    same metre space as the exported vertices.
+def _gltf_ibm(maya_flat16, unit_scale):
+    """A Maya bindPreMatrix as a glTF inverseBindMatrix.
 
-    Maya MMatrix is row-major: translation at flat indices 12,13,14. Flattening a
-    row-major 4x4 and a column-major 4x4 are transposes of each other, so the
-    transpose below yields glTF's column-major layout. After transposing, the
-    translation sits in the last COLUMN -> flat indices 12,13,14.
+    getAttr flattens Maya's row-vector matrix row by row, translation at 12-14;
+    glTF flattens its column-vector matrix column by column, translation at
+    12-14 too. The two flat lists are the same matrix, so nothing is transposed:
+    only the translation goes from centimetres to the output unit.
     """
-    m = list(maya_flat16)
-    # Transpose 4x4: out[col*4 + row] = in[row*4 + col].
-    t = [0.0] * 16
-    for row in range(4):
-        for col in range(4):
-            t[col * 4 + row] = float(m[row * 4 + col])
-    # Translation column (indices 12,13,14) -> metres.
-    if unit_scale and unit_scale != 1.0:
-        t[12] /= unit_scale
-        t[13] /= unit_scale
-        t[14] /= unit_scale
+    t = [float(v) for v in maya_flat16]
+    t[12] /= unit_scale
+    t[13] /= unit_scale
+    t[14] /= unit_scale
     return tuple(t)
+
+
+def _dag_path(node):
+    sel = om.MSelectionList()
+    sel.add(node)
+    return sel.getDagPath(0)
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]
+
+
+_STILL = 1e-6
+
+
+def _changes(values, quaternions=False):
+    """True when any sample differs from the first by more than _STILL.
+    Quaternions q and -q are the same rotation."""
+    if not values:
+        return False
+    first = values[0]
+    for value in values[1:]:
+        if quaternions:
+            if 1.0 - abs(_dot(first, value)) > _STILL:
+                return True
+            continue
+        for a, b in zip(first, value):
+            if abs(a - b) > _STILL:
+                return True
+    return False
+
+
+_RIG_NODE_TYPES = ("ikHandle", "ikEffector")
+
+
+def _is_rig_node(node):
+    try:
+        if cmds.objectType(node, isAType="constraint"):
+            return True
+        return cmds.nodeType(node) in _RIG_NODE_TYPES
+    except Exception:
+        return False
+
+
+def _animation_ranges(options):
+    """[(name, first frame, last frame)] for the animations to write."""
+    clips = options.get("clips") or []
+    if clips:
+        return [(str(c["name"]), float(c["start"]), float(c["end"])) for c in clips]
+    frame_range = options.get("frameRange")
+    if frame_range:
+        first, last = float(frame_range[0]), float(frame_range[1])
+    else:
+        first, last = _playback_range()
+    name = options.get("animationName") or _scene_name() or "take001"
+    return [(name, first, last)]
 
 
 # ---------------------------------------------------------------------------
 # Animation helpers
 # ---------------------------------------------------------------------------
-
-def _has_anim(node, attrs):
-    """True if any of `attrs` on `node` is driven by an animCurve."""
-    for attr in attrs:
-        plug = node + "." + attr
-        try:
-            conns = cmds.listConnections(plug, source=True, destination=False,
-                                         type="animCurve") or []
-        except Exception:
-            conns = []
-        if conns:
-            return True
-    return False
-
 
 def _playback_range():
     """Return (min_frame, max_frame) of the active playback range."""
@@ -1247,21 +1235,6 @@ def _scene_name():
         return ""
     base = os.path.basename(full)
     return os.path.splitext(base)[0]
-
-
-def _node_local_quat(node):
-    """Read a node's LOCAL rotation as a glTF quaternion (x,y,z,w), honoring its
-    rotateOrder. Local space matches how the importer applies rotation channels
-    (per-node TRS), so the round-trip stays consistent."""
-    try:
-        sel = om.MSelectionList()
-        sel.add(node)
-        dag = sel.getDagPath(0)
-        fn = om.MFnTransform(dag)
-        q = fn.rotation(om.MSpace.kTransform, asQuaternion=True)
-        return (q.x, q.y, q.z, q.w)
-    except Exception:
-        return (0.0, 0.0, 0.0, 1.0)
 
 
 def _first_mesh_shape(transform):
@@ -1416,27 +1389,21 @@ def _compute_tri_tangent(pos_array, tri_globals, tri_uvs):
 # ---------------------------------------------------------------------------
 
 def _auto_unit_scale():
-    """Divisor to convert Maya scene-unit positions -> metres (glTF standard).
+    """Centimetres per metre: the API's lengths are centimetres in any scene."""
+    return 100.0
 
-    Mirrors maya_anno_addon/_coord.auto_unit_scale + _build._auto_unit_scale:
-    a cm scene returns 100.0 (divide positions by 100 to get metres).
-    """
+
+def _resolve_unit_scale(options):
+    """The divisor for every length the API gives (centimetres): 100 for metres,
+    or the scene unit's size in cm when unit conversion is off."""
+    if options.get("convertUnits", True):
+        return _auto_unit_scale()
     linear = cmds.currentUnit(query=True, linear=True) or "cm"
     unit_to_cm = {
         "mm": 0.1, "cm": 1.0, "m": 100.0,
         "in": 2.54, "ft": 30.48, "yd": 91.44,
     }
-    cm_per_unit = unit_to_cm.get(linear, 1.0)
-    # metres = cm / 100. To convert N scene-units (= N*cm_per_unit cm) to metres
-    # we divide by (100 / cm_per_unit).
-    return 100.0 / cm_per_unit
-
-
-def _resolve_unit_scale(options):
-    """Return the POSITION divisor. 1.0 when unit conversion is off."""
-    if not options.get("convertUnits", True):
-        return 1.0
-    return _auto_unit_scale()
+    return unit_to_cm.get(linear, 1.0)
 
 
 def _normalize_options(options):
