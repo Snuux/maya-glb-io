@@ -5,6 +5,13 @@ All notable changes to Maya GLB I/O are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.3] - 2026-11-20
+
+### Fixed
+- Import: undoing the import of a mesh with morph targets left a stray `polySurface` mesh
+  behind. The temporary target meshes now sit under transforms made by `cmds`, so undo
+  removes them.
+
 ## [1.0.2] - 2026-11-20
 
 Fork of annomodtutorials/maya-glb-io, used by bmaya-cli.

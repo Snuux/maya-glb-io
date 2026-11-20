@@ -4,13 +4,13 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Maya 2022+](https://img.shields.io/badge/Maya-2022%2B-blue.svg)](https://www.autodesk.com/products/maya/)
-[![Version 1.0.2](https://img.shields.io/badge/version-1.0.2-orange.svg)](CHANGELOG.md)
+[![Version 1.0.3](https://img.shields.io/badge/version-1.0.3-orange.svg)](CHANGELOG.md)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 > **This is a fork** of [annomodtutorials/maya-glb-io](https://github.com/annomodtutorials/maya-glb-io)
 > kept for [bmaya-cli](https://github.com/Snuux/bmaya-cli). It fixes skinned export (inverse bind
 > matrices), non-centimetre scenes and constraint/IK-driven animation, and adds named clips.
-> See [CHANGELOG.md](CHANGELOG.md) for 1.0.2.
+> See [CHANGELOG.md](CHANGELOG.md) for 1.0.2 and later.
 
 Maya GLB I/O brings full glTF 2.0 in **both directions** to Maya — geometry, PBR materials,
 material variants, rigs, animation, morph targets, cameras, lights, and Draco compression —
