@@ -270,6 +270,98 @@ def check_cubic():
     print("cubic ok")
 
 
+def check_cubic_weights():
+    """A CUBICSPLINE `weights` output is, per key, the in-tangents of every
+    target, then the values, then the out-tangents."""
+    cmds.file(new=True, force=True)
+    cmds.currentUnit(time="ntsc")
+    fps = 30.0
+    buffer = Buffer()
+    prim = triangle(buffer)
+    prim["targets"] = [
+        {"POSITION": buffer.add([(0, 0, 1), (0, 0, 0), (0, 0, 0)], "VEC3", minmax=True)},
+        {"POSITION": buffer.add([(0, 0, 0), (0, 0, 1), (0, 0, 0)], "VEC3", minmax=True)},
+    ]
+    times = buffer.add([0.0, 2.0], "SCALAR", minmax=True)
+    output = [0, 0, 0, 1, 1.5, -0.5,
+              0.5, 0, 1, 0.25, 0, 0]
+    doc = buffer.finish({
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"name": "face", "mesh": 0}],
+        "meshes": [{"primitives": [prim], "weights": [0, 0]}],
+        "animations": [{"name": "talk", "samplers": [
+            {"input": times, "output": buffer.add(output, "SCALAR"),
+             "interpolation": "CUBICSPLINE"},
+        ], "channels": [{"sampler": 0, "target": {"node": 0, "path": "weights"}}]}],
+    })
+    importer.import_file(write("cubic_weights.gltf", doc), dict(IMPORT_OPTIONS))
+    shapes = cmds.ls(type="blendShape")
+    assert len(shapes) == 1, shapes
+    for s in (0.0, 0.25, 0.5, 0.75, 1.0):
+        frame = s * 2.0 * fps
+        first = cmds.getAttr(shapes[0] + ".weight[0]", time=frame)
+        second = cmds.getAttr(shapes[0] + ".weight[1]", time=frame)
+        want_first = hermite(s, 2.0, 0, 1.5, 1, 0.5)
+        want_second = hermite(s, 2.0, 1, -0.5, 0.25, 0)
+        assert close(first, want_first, 1e-3) and close(second, want_second, 1e-3), \
+            (s, first, want_first, second, want_second)
+    print("cubic weights ok")
+
+
+def check_skin_names():
+    """Joints and a skinned mesh keep their glTF names through import and export."""
+    cmds.file(new=True, force=True)
+    buffer = Buffer()
+    points = [(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, 1, 0), (0, 2, 0), (1, 2, 0)]
+    faces = [0, 1, 2, 2, 1, 3, 2, 3, 4, 4, 3, 5]
+    joints = [(0, 1, 0, 0)] * 6
+    weights = [(1, 0, 0, 0), (0.9, 0.1, 0, 0), (0.5, 0.5, 0, 0),
+               (0.4, 0.6, 0, 0), (0.2, 0.8, 0, 0), (0, 1, 0, 0)]
+    identity = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+    up = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -1, 0, 1)
+    prim = {
+        "attributes": {
+            "POSITION": buffer.add(points, "VEC3", minmax=True),
+            "JOINTS_0": buffer.add(joints, "VEC4", USHORT),
+            "WEIGHTS_0": buffer.add(weights, "VEC4"),
+        },
+        "indices": buffer.add(faces, "SCALAR", UINT),
+    }
+    wanted = ["Body Mesh", "mixamorig:Hips", "Bone.001"]
+    doc = buffer.finish({
+        "scene": 0,
+        "scenes": [{"nodes": [0, 1]}],
+        "nodes": [
+            {"name": wanted[0], "mesh": 0, "skin": 0},
+            {"name": wanted[1], "children": [2]},
+            {"name": wanted[2], "translation": [0, 1, 0]},
+        ],
+        "meshes": [{"primitives": [prim]}],
+        "skins": [{"joints": [1, 2], "inverseBindMatrices": buffer.add([identity, up], "MAT4")}],
+    })
+    for name, options in (("skin_names", dict(IMPORT_OPTIONS)),
+                          ("skin_names_default", {"skipMaterials": True})):
+        cmds.file(new=True, force=True)
+        importer.import_file(write(name + ".gltf", doc), dict(options))
+        found = {}
+        for node in cmds.ls(type="transform", long=True):
+            if cmds.attributeQuery("gltfName", node=node, exists=True):
+                found[_names.short_name(node)] = exporter.written_name(node)
+        assert found == {"Body_Mesh": "Body Mesh", "mixamorig_Hips": "mixamorig:Hips",
+                         "Bone_001": "Bone.001"}, (name, found)
+        assert cmds.nodeType("Bone_001") == "joint" and cmds.ls(type="skinCluster"), name
+        out = os.path.join(OUT, name + "_out.gltf")
+        tops = cmds.ls("Body_Mesh", "mixamorig_Hips", long=True)
+        exporter.export_nodes(tops, out, {"format": "gltf", "exportAnimation": False})
+        back = read(out).doc
+        names = [n.get("name") for n in back["nodes"]]
+        assert sorted(names) == sorted(wanted), (name, names)
+        skin_joints = [back["nodes"][i]["name"] for i in back["skins"][0]["joints"]]
+        assert sorted(skin_joints) == sorted(wanted[1:]), (name, skin_joints)
+    print("skin names ok")
+
+
 def check_draco():
     if not _draco.dracopy_available():
         print("draco SKIPPED: DracoPy is not installed")
@@ -424,6 +516,8 @@ def main():
     check_names()
     check_target_names()
     check_cubic()
+    check_cubic_weights()
+    check_skin_names()
     check_draco()
     check_reduce_keys()
     check_missing_texture()
