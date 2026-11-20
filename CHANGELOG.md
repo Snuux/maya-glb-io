@@ -5,6 +5,27 @@ All notable changes to Maya GLB I/O are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] - 2026-11-20
+
+Fork of annomodtutorials/maya-glb-io, used by bmaya-cli.
+
+### Fixed
+- Export: inverse bind matrices were transposed, which put the translation in the wrong
+  cells; Maya's flat bindPreMatrix already has glTF's layout. Engines now bind skins at
+  the right joint positions.
+- Export: lengths from the Maya API are centimetres in every scene, so scenes in metres,
+  millimetres or inches export at their real size.
+- Export: animation is sampled from each node's matrix, so constraints, IK, expressions
+  and driven keys are written, and animated translation keeps pivots and parent space.
+  Only channels that move, or hold away from the rest pose, are written.
+- Export: constraints, IK handles and effectors are no longer written as empty nodes.
+
+### Added
+- Export options `clips` (one glTF animation per name and frame range), `frameRange` and
+  `animationName`.
+- `MAYA_GLB_IO_OFFLINE=1` turns off the update check and the DracoPy pip install.
+- Update checks follow this fork's releases.
+
 ## [1.0.1] - 2026-06-22
 
 ### Added

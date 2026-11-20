@@ -15,8 +15,8 @@ import threading
 import time
 import urllib.request
 
-API_URL      = "https://api.github.com/repos/annomodtutorials/maya-glb-io/releases/latest"
-RELEASES_URL = "https://github.com/annomodtutorials/maya-glb-io/releases/latest"
+API_URL      = "https://api.github.com/repos/Snuux/maya-glb-io/releases/latest"
+RELEASES_URL = "https://github.com/Snuux/maya-glb-io/releases/latest"
 
 _OPTVAR_LAST   = "glbIO_lastUpdateCheck"   # epoch seconds of last successful check
 _CHECK_INTERVAL = 24 * 3600                # auto-check at most once per day
