@@ -5,6 +5,13 @@ All notable changes to Maya GLB I/O are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-11-24
+
+### Fixed
+- Dragging a .glb into Maya (or File > Import with Maya namespaces) no longer wraps the whole
+  scene, default cameras and the UI namespace included, into the file's namespace. Merging
+  it back destroyed the viewport panels and left Maya unable to show windows.
+
 ## [1.1.0] - 2026-11-21
 
 ### Added
