@@ -5,6 +5,12 @@ All notable changes to Maya GLB I/O are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.2] - 2026-11-24
+
+### Fixed
+- Export writes every UV set: the current one as TEXCOORD_0, the others as TEXCOORD_1, 2...
+  in Maya's order. A lightmap or second UV set used to be dropped.
+
 ## [1.1.1] - 2026-11-24
 
 ### Fixed
