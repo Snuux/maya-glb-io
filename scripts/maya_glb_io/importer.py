@@ -93,24 +93,17 @@ def import_file(path, options=None):
     #
     # When the user imports through Maya's native File > Import dialog, Maya's
     # OWN "Use namespaces" checkbox (separate from our option) can wrap the
-    # imported nodes — and occasionally the entire scene, including the default
-    # cameras — into a namespace named after the file (e.g. "stonePyramid:").
+    # imported nodes into a namespace named after the file (e.g. "stonePyramid:").
     # We can't stop Maya from creating it, but we CAN flatten it back to the
     # root namespace afterwards.
     #
-    # Strategy: snapshot the namespaces that exist now, force our own node
-    # creation to happen in the root namespace, and then (deferred, so it runs
+    # Strategy: snapshot the namespaces that exist now, build in whatever
+    # namespace Maya made current (switching to root made Maya wrap the whole
+    # scene, UI included, into its namespace), and then (deferred, so it runs
     # after Maya has finished applying its namespace) merge any namespace that
     # newly appeared back into root. The deferred merge no-ops on the clean
     # menu-import path because no new namespace appears there.
     ns_before = _list_namespaces()
-    if not use_ns:
-        try:
-            cur = cmds.namespaceInfo(currentNamespace=True) or ":"
-            if cur != ":":
-                cmds.namespace(setNamespace=":")
-        except Exception:
-            pass
 
     cmds.undoInfo(openChunk=True, chunkName="glb_io import")
     try:
