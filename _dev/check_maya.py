@@ -512,6 +512,22 @@ def check_missing_texture():
     print("missing texture ok")
 
 
+def check_uv_sets():
+    cmds.file(new=True, force=True)
+    cube = cmds.polyCube(name="box")[0]
+    cmds.polyUVSet(cube, create=True, uvSet="lightmap")
+    cmds.polyProjection(cube + ".f[*]", type="Planar", md="x", uvSetName="lightmap")
+    out = os.path.join(OUT, "uv_sets.glb")
+    exporter.export_nodes([cube], out, {"format": "glb", "exportAnimation": False})
+    gltf = read(out)
+    attrs = gltf.doc["meshes"][0]["primitives"][0]["attributes"]
+    assert "TEXCOORD_1" in attrs, attrs
+    first = gltf.read_accessor(attrs["TEXCOORD_0"])
+    second = gltf.read_accessor(attrs["TEXCOORD_1"])
+    assert len(first) == len(second) and first != second, (first[:3], second[:3])
+    print("uv sets ok")
+
+
 def main():
     check_names()
     check_target_names()
@@ -521,6 +537,7 @@ def main():
     check_draco()
     check_reduce_keys()
     check_missing_texture()
+    check_uv_sets()
     print("SUCCESS")
 
 

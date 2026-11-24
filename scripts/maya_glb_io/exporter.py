@@ -458,6 +458,14 @@ class _SceneBuilder(object):
         pos_array = mfn.getPoints(om.MSpace.kObject)
         has_uvs = mfn.numUVs() > 0
         u_arr, v_arr = (mfn.getUVs() if has_uvs else (None, None))
+        # The current set is TEXCOORD_0; the other sets follow in Maya's order.
+        current_set = mfn.currentUVSetName() if has_uvs else ""
+        more_sets = [
+            (name,) + tuple(mfn.getUVs(name))
+            for name in (mfn.getUVSetNames() if has_uvs else [])
+            if name != current_set and mfn.numUVs(name) > 0
+        ]
+        more_uvs = [[] for _ in more_sets]
 
         # Vertex colour set (if any).
         color_set_name = None
@@ -542,6 +550,14 @@ class _SceneBuilder(object):
                                         1.0 - float(v_arr[uv_idx])])
                         except (RuntimeError, IndexError):
                             uvs.extend([0.0, 0.0])
+                    for (set_name, set_u, set_v), out in zip(more_sets, more_uvs):
+                        try:
+                            local_fv = _find_local_face_vertex(poly_iter, vg)
+                            uv_idx = poly_iter.getUVIndex(local_fv, set_name)
+                            out.extend([float(set_u[uv_idx]),
+                                        1.0 - float(set_v[uv_idx])])
+                        except (RuntimeError, IndexError):
+                            out.extend([0.0, 0.0])
 
                     # COLOR_0
                     if color_set_name:
@@ -567,6 +583,7 @@ class _SceneBuilder(object):
             normals=normals,
             tangents=tangents,
             texcoords=uvs,
+            more_texcoords=more_uvs,
             colors=colors,
         )
 

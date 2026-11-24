@@ -83,18 +83,21 @@ class Primitive(object):
     """
 
     __slots__ = (
-        "positions", "normals", "tangents", "texcoords", "colors",
+        "positions", "normals", "tangents", "texcoords", "more_texcoords", "colors",
         "indices", "material_index", "joints", "weights", "morph_targets",
     )
 
     def __init__(self, positions, indices, normals=None, tangents=None,
                  texcoords=None, colors=None, material_index=None,
-                 joints=None, weights=None, morph_targets=None):
+                 joints=None, weights=None, morph_targets=None,
+                 more_texcoords=None):
         self.positions = positions or []
         self.indices = indices or []
         self.normals = normals or []
         self.tangents = tangents or []
         self.texcoords = texcoords or []
+        # TEXCOORD_1, TEXCOORD_2, ...: one flat list per further UV set.
+        self.more_texcoords = more_texcoords or []
         self.colors = colors or []
         self.material_index = material_index
         # Skinning attributes (optional). `joints` is a flat list of 4 ints per
@@ -760,6 +763,10 @@ def _primitive_to_json(prim, packer):
     if prim.texcoords:
         attributes["TEXCOORD_0"] = packer.add_float_accessor(
             prim.texcoords, "VEC2", TARGET_ARRAY_BUFFER
+        )
+    for number, texcoords in enumerate(prim.more_texcoords, start=1):
+        attributes["TEXCOORD_%d" % number] = packer.add_float_accessor(
+            texcoords, "VEC2", TARGET_ARRAY_BUFFER
         )
     if prim.colors:
         attributes["COLOR_0"] = packer.add_float_accessor(
